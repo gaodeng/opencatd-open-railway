@@ -197,7 +197,7 @@ func HandleMe(c *gin.Context) {
 		int(u.ID),
 		u.UpdatedAt.Format(time.RFC3339),
 		u.Name,
-		u.Token[:15] + "*****" + u.Token[len(u.Token)-15:],
+		u.Token,
 		u.CreatedAt.Format(time.RFC3339),
 	}
 	c.JSON(http.StatusOK, resJSON)
@@ -378,8 +378,12 @@ func HandleDelUser(c *gin.Context) {
 
 func HandleResetUserToken(c *gin.Context) {
 	id := to.Int(c.Param("id"))
+	newtoken := c.Query("token")
+	if newtoken == "" {
+		newtoken = uuid.NewString()
+	}
 
-	if err := store.UpdateUser(uint(id), uuid.NewString()); err != nil {
+	if err := store.UpdateUser(uint(id), newtoken); err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
@@ -463,7 +467,7 @@ func HandleProy(c *gin.Context) {
 			var buildurl string
 			var apiVersion = "2023-05-15"
 			if onekey.EndPoint != "" {
-				buildurl = fmt.Sprintf("https://%s/openai/deployments/%s/chat/completions?api-version=%s", onekey.EndPoint, modelmap(chatreq.Model), apiVersion)
+				buildurl = fmt.Sprintf("%s/openai/deployments/%s/chat/completions?api-version=%s", onekey.EndPoint, modelmap(chatreq.Model), apiVersion)
 			} else {
 				buildurl = fmt.Sprintf("https://%s.openai.azure.com/openai/deployments/%s/chat/completions?api-version=%s", onekey.ResourceNmae, modelmap(chatreq.Model), apiVersion)
 			}
@@ -634,12 +638,24 @@ func Cost(model string, promptCount, completionCount int) float64 {
 	completion = float64(completionCount)
 
 	switch model {
-	case "gpt-3.5-turbo", "gpt-3.5-turbo-0301":
+	case "gpt-3.5-turbo-0301":
 		cost = 0.002 * float64((prompt+completion)/1000)
-	case "gpt-4", "gpt-4-0314":
+	case "gpt-3.5-turbo", "gpt-3.5-turbo-0613":
+		cost = 0.0015*float64((prompt)/1000) + 0.002*float64(completion/1000)
+	case "gpt-3.5-turbo-16k", "gpt-3.5-turbo-16k-0613":
+		cost = 0.003*float64((prompt)/1000) + 0.004*float64(completion/1000)
+	case "gpt-4", "gpt-4-0613", "gpt-4-0314":
 		cost = 0.03*float64(prompt/1000) + 0.06*float64(completion/1000)
-	case "gpt-4-32k", "gpt-4-32k-0314":
+	case "gpt-4-32k", "gpt-4-32k-0613":
 		cost = 0.06*float64(prompt/1000) + 0.12*float64(completion/1000)
+	default:
+		if strings.Contains(model, "gpt-3.5-turbo") {
+			cost = 0.003 * float64((prompt+completion)/1000)
+		} else if strings.Contains(model, "gpt-4") {
+			cost = 0.06 * float64((prompt+completion)/1000)
+		} else {
+			cost = 0.002 * float64((prompt+completion)/1000)
+		}
 	}
 	return cost
 }
@@ -721,38 +737,57 @@ func fetchResponseContent(ctx *gin.Context, responseBody *bufio.Reader) <-chan s
 	return contentCh
 }
 
-func NumTokensFromMessages(messages []openai.ChatCompletionMessage, model string) (num_tokens int) {
+func NumTokensFromMessages(messages []openai.ChatCompletionMessage, model string) (numTokens int) {
 	tkm, err := tiktoken.EncodingForModel(model)
 	if err != nil {
 		err = fmt.Errorf("EncodingForModel: %v", err)
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
 
-	var tokens_per_message int
-	var tokens_per_name int
-	if model == "gpt-3.5-turbo-0301" || model == "gpt-3.5-turbo" {
-		tokens_per_message = 4
-		tokens_per_name = -1
-	} else if model == "gpt-4-0314" || model == "gpt-4" {
-		tokens_per_message = 3
-		tokens_per_name = 1
-	} else {
-		fmt.Println("Warning: model not found. Using cl100k_base encoding.")
-		tokens_per_message = 3
-		tokens_per_name = 1
+	var tokensPerMessage, tokensPerName int
+
+	switch model {
+	case "gpt-3.5-turbo",
+		"gpt-3.5-turbo-0613",
+		"gpt-3.5-turbo-16k",
+		"gpt-3.5-turbo-16k-0613",
+		"gpt-4",
+		"gpt-4-0314",
+		"gpt-4-0613",
+		"gpt-4-32k",
+		"gpt-4-32k-0314",
+		"gpt-4-32k-0613":
+		tokensPerMessage = 3
+		tokensPerName = 1
+	case "gpt-3.5-turbo-0301":
+		tokensPerMessage = 4 // every message follows <|start|>{role/name}\n{content}<|end|>\n
+		tokensPerName = -1   // if there's a name, the role is omitted
+	default:
+		if strings.Contains(model, "gpt-3.5-turbo") {
+			log.Println("warning: gpt-3.5-turbo may update over time. Returning num tokens assuming gpt-3.5-turbo-0613.")
+			return NumTokensFromMessages(messages, "gpt-3.5-turbo-0613")
+		} else if strings.Contains(model, "gpt-4") {
+			log.Println("warning: gpt-4 may update over time. Returning num tokens assuming gpt-4-0613.")
+			return NumTokensFromMessages(messages, "gpt-4-0613")
+		} else {
+			err = fmt.Errorf("warning: unknown model [%s]. Use default calculation method converted tokens.", model)
+			log.Println(err)
+			return NumTokensFromMessages(messages, "gpt-3.5-turbo-0613")
+		}
 	}
 
 	for _, message := range messages {
-		num_tokens += tokens_per_message
-		num_tokens += len(tkm.Encode(message.Content, nil, nil))
-		// num_tokens += len(tkm.Encode(message.Role, nil, nil))
+		numTokens += tokensPerMessage
+		numTokens += len(tkm.Encode(message.Content, nil, nil))
+		numTokens += len(tkm.Encode(message.Role, nil, nil))
+		numTokens += len(tkm.Encode(message.Name, nil, nil))
 		if message.Name != "" {
-			num_tokens += tokens_per_name
+			numTokens += tokensPerName
 		}
 	}
-	num_tokens += 3
-	return num_tokens
+	numTokens += 3
+	return numTokens
 }
 
 func NumTokensFromStr(messages string, model string) (num_tokens int) {
@@ -768,11 +803,9 @@ func NumTokensFromStr(messages string, model string) (num_tokens int) {
 }
 
 func modelmap(in string) string {
-	switch in {
-	case "gpt-3.5-turbo":
-		return "gpt-35-turbo"
-	case "gpt-4":
-		return "gpt-4"
+	// gpt-3.5-turbo -> gpt-35-turbo
+	if strings.Contains(in, ".") {
+		return strings.ReplaceAll(in, ".", "")
 	}
 	return in
 }

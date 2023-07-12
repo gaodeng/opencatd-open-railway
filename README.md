@@ -50,6 +50,11 @@ wget https://github.com/mirrors2/opencatd-open/raw/main/docker/docker-compose.ym
 >重置 root 的 token 
   - `docker exec opencatd-open opencatd reset_root` 
 
+>导出 user info -> user.json (docker file path: /app/db/user.json)
+  - `docker exec opencatd-open opencatd save`   
+
+>导入 user.json -> db 
+  - `docker exec opencatd-open opencatd load` 
 
 ## Q&A
 关于证书?
@@ -67,7 +72,10 @@ wget https://github.com/mirrors2/opencatd-open/raw/main/docker/docker-compose.ym
   - 设置环境变量 openai_endpoint
 
 使用Nginx + Docker部署
-- [使用Nginx + Docker部署](./doc/deploy.md)
+  - [使用Nginx + Docker部署](./doc/deploy.md)
+  
+pandora for team
+  - [pandora for team](./doc/pandora.md)
 # License
 
 [GNU General Public License v3.0](License)
